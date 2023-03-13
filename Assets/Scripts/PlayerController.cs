@@ -24,7 +24,8 @@ public enum PlayerMovementState
     Ground,
     Slope,
     Air,
-    WallRunning
+    WallRunning,
+    Swinging
 }
 
 public enum JumpState
@@ -102,6 +103,12 @@ public class PlayerController : MonoBehaviour
     private PhysicMaterial _physicMaterial;
 
 
+    //Swinging
+    private SpringJoint _joint;
+    private Vector3 _jointEndPoint;
+    private ChainGenerator _chainGenerator;
+
+
     //Detection and movement state
     private DetectionFlags _detectionFlags = DetectionFlags.None;
     private PlayerMovementState _playerMovementState = PlayerMovementState.Ground;
@@ -129,6 +136,10 @@ public class PlayerController : MonoBehaviour
         _physicMaterial = _capsuleCollider.material;
         _groundLayerMasks = new string[] { _groundMask, _wallMask };
         _currentAirForce = _minAirForce;
+        _joint = GetComponent<SpringJoint>();
+        _chainGenerator = GetComponentInChildren<ChainGenerator>();
+        Cursor.visible = false;
+        Cursor.lockState = CursorLockMode.Locked;
         
     }
 
@@ -158,8 +169,7 @@ public class PlayerController : MonoBehaviour
 
         //Rotation
         UpdateMouseInput();
-        UpdateRotation();
-
+        UpdateSwing();
 
         //Movement
         UpdateMovementInput();
@@ -176,10 +186,10 @@ public class PlayerController : MonoBehaviour
         UpdatePlayerPhysicMaterial();
 
 
-        Debug.Log("=====CURRENT AIR FORCE=====");
-        Debug.Log(_currentAirForce);
-        Debug.Log("=====Y VELOCITY=====");
-        Debug.Log(_rigidbody.velocity.y);
+        //Debug.Log("=====CURRENT AIR FORCE=====");
+        //Debug.Log(_currentAirForce);
+        //Debug.Log("=====Y VELOCITY=====");
+        //Debug.Log(_rigidbody.velocity.y);
        
 
     }
@@ -192,7 +202,7 @@ public class PlayerController : MonoBehaviour
         {
             case JumpState.Ready:
 
-                if (Input.GetKeyDown(KeyCode.Space))
+                if (Input.GetKeyDown(KeyCode.Space) && _playerMovementState != PlayerMovementState.Swinging)
                 {
                     switch (_playerMovementState)
                     {
@@ -216,14 +226,14 @@ public class PlayerController : MonoBehaviour
                             _playerMovementState = PlayerMovementState.Air;
                             break;
                     }
-
+                   
                     _jumpState = JumpState.InProgress;
                     _jumpResetRoutine = StartCoroutine(ResetJumpRoutine());
                 }
 
                 break;
             case JumpState.Resetting:
-                if (_playerMovementState != PlayerMovementState.Air)
+                if (_playerMovementState != PlayerMovementState.Air && _playerMovementState != PlayerMovementState.Swinging)
                 {
                     _jumpState = JumpState.Ready;
                     _playerMovementStateWhenJumping = _playerMovementState;
@@ -268,17 +278,74 @@ public class PlayerController : MonoBehaviour
             _physicMaterial.staticFriction = 0f;
 
     }
+    [Header("Swinging Joint")]
+    [SerializeField]
+    private Transform _anchorTransform;
+    [SerializeField]
+    private float _jointSpring;
+    [SerializeField]
+    private float _jointDamper;
+    [SerializeField]
+    private float _jointMaxDistanceMultiplier;
+    [SerializeField]
+    private float _jointMinDistance;
+    [SerializeField]
+    private float _jointMassScale;
+    [SerializeField]
+    private float _swingImpulse;
+    [SerializeField]
+    private float _swingDetectionDistance;
+
+    private void UpdateSwing()
+    {
+        if (_playerMovementState == PlayerMovementState.Air && Input.GetMouseButtonDown(1))
+        {
+            Ray rayFromCenterOfViewport = Camera.main.ViewportPointToRay(new Vector3(.5f, .5f));
+           if(Physics.SphereCast(rayFromCenterOfViewport.origin, .3f, rayFromCenterOfViewport.direction, out RaycastHit hit, _swingDetectionDistance))
+           {
+                if(hit.collider != null && hit.collider.CompareTag("Grapplable"))
+                {
+                    _joint = gameObject.AddComponent<SpringJoint>();
+                    _jointEndPoint = hit.point;
+                    _joint.autoConfigureConnectedAnchor = false;
+                    _joint.spring = _jointSpring;
+                    _joint.damper = _jointDamper;
+                    _joint.anchor = transform.InverseTransformPoint(_anchorTransform.position);
+                    _joint.connectedAnchor = hit.point;
+                    _joint.maxDistance = hit.distance * _jointMaxDistanceMultiplier;
+                    _joint.minDistance = _jointMinDistance;
+                    _joint.massScale = _jointMassScale;
+                    _rigidbody.AddForce(Vector3.ProjectOnPlane(_rigidbody.velocity, Vector3.up).normalized * _swingImpulse, ForceMode.Impulse);
+                    _playerMovementState = PlayerMovementState.Swinging;
+
+                    _chainGenerator.EnableLine(hit.point);
+                }
+           }
+        }
+
+        if(_playerMovementState == PlayerMovementState.Swinging && Input.GetMouseButtonUp(1))
+        {
+            if(_joint!= null)
+            {
+                _playerMovementState = PlayerMovementState.Air;
+                _chainGenerator.DisableLine();
+                Destroy(_joint);
+            }
+        }
+    }
 
     private void UpdateMouseInput()
     {
         _mouseInput = new Vector2(Input.GetAxis("Mouse X") * _mouseXSensitivity, Input.GetAxis("Mouse Y") * _mouseYSensitivity * -1f);
         _mouseInput *= Time.deltaTime;
+
+        
     }
 
     private void UpdateMovementInput()
     {
         _moveDirection = new Vector3(Input.GetAxis("Horizontal"), 0f, Input.GetAxis("Vertical"));
-        _moveDirection = transform.rotation * _moveDirection;
+        
     }
 
     private void UpdateMovement()
@@ -298,15 +365,7 @@ public class PlayerController : MonoBehaviour
 
     }
 
-    private void UpdateRotation()
-    {
 
-
-        
-        
-       // transform.Rotate(new Vector3(0f, _mouseInput.x, 0f));
-       
-    }
 
 
 
@@ -474,43 +533,53 @@ public class PlayerController : MonoBehaviour
     private void UpdateMovementState()
     {
 
-
-        if ((_detectionFlags & DetectionFlags.Bottom) != 0)
+        switch(_playerMovementState)
         {
-            _playerMovementState = PlayerMovementState.Ground;
+            case PlayerMovementState.Swinging:
+                if(Physics.Raycast(new Ray(transform.position + (Vector3.up * _capsuleCollider.height * .8f), Vector3.up), 1f))
+                {
+                    Debug.Log("Leaving Swinging, hit something above");
+                    if(_joint != null)
+                        Destroy(_joint);
+
+                    _chainGenerator.DisableLine();
+                    _playerMovementState = PlayerMovementState.Air;
+                }
+                break;
+            default:
+                if ((_detectionFlags & DetectionFlags.Bottom) != 0)
+                {
+                    _playerMovementState = PlayerMovementState.Ground;
+                }
+                else if ((_detectionFlags & (DetectionFlags.LeftSide | DetectionFlags.RightSide)) != 0 && ((_jumpState == JumpState.InProgress && _playerMovementStateWhenJumping != PlayerMovementState.WallRunning) || (_jumpState != JumpState.InProgress)))
+                {
+
+                    _playerMovementState = PlayerMovementState.WallRunning;
+
+
+                }
+                else
+                {
+                    if (_playerMovementState != PlayerMovementState.Air)
+                    {
+                        _currentAirForce = _minAirForce;
+                    }
+
+                    _playerMovementState = PlayerMovementState.Air;
+                }
+                break;
         }
-        else if ((_detectionFlags & (DetectionFlags.LeftSide | DetectionFlags.RightSide)) != 0 && ((_jumpState == JumpState.InProgress && _playerMovementStateWhenJumping != PlayerMovementState.WallRunning) || (_jumpState != JumpState.InProgress)))
-        {
-
-            _playerMovementState = PlayerMovementState.WallRunning;
-
-
-        }
-        else
-        {
-            if(_playerMovementState != PlayerMovementState.Air)
-            {
-                _currentAirForce = _minAirForce;
-            }
-
-            _playerMovementState = PlayerMovementState.Air;
-        }
-            
-
-
-
 
     }
 
 
     private void GroundMovementUpdate()
     {
-        _moveDirection = Vector3.ProjectOnPlane(_moveDirection, _bottomHit.normal).normalized;
-        Debug.Log(_jumpState);
+        _moveDirection = Vector3.ProjectOnPlane( _moveDirection, _bottomHit.normal).normalized;
+
         if (_jumpState != JumpState.InProgress)
         {
 
-            
             _rigidbody.drag = Mathf.Clamp(10f - _moveDirection.magnitude * 12f, 0f, 10f);
         }
         else
@@ -527,9 +596,8 @@ public class PlayerController : MonoBehaviour
     #region FixedUpdate
     private void FixedUpdate()
     {
-
-        
-        _rigidbody.MoveRotation(Quaternion.AngleAxis(_camera.transform.rotation.eulerAngles.y, Vector3.up));
+        //if(_playerMovementState != PlayerMovementState.Swinging)
+            _rigidbody.MoveRotation(Quaternion.AngleAxis(_camera.transform.rotation.eulerAngles.y, Vector3.up));
 
         FixedUpdateRigidbodyGravity();
 
@@ -540,12 +608,31 @@ public class PlayerController : MonoBehaviour
             case PlayerMovementState.Air:
                 RegularMovementFixedUpdate();
                 break;
+            case PlayerMovementState.Swinging:
+                SwingingMovementFixedUpdate();
+                break;
 
         }
 
         //Max Speed
         ClampRigidbodyMaxVelocity();
 
+    }
+
+    private void SwingingMovementFixedUpdate()
+    {
+        Vector3 crossProd = Vector3.Cross(_camera.transform.right, (_jointEndPoint - _anchorTransform.position).normalized);
+        Debug.DrawLine(_anchorTransform.position, (_anchorTransform.position + crossProd * 10f), Color.yellow);
+        _rigidbody.AddForce((crossProd * 20f * _moveDirection.z) + (_camera.transform.right * 20f * _moveDirection.x));
+        _rigidbody.drag = 0f;
+        if (_joint != null && (Vector3.Dot(crossProd, Vector3.up) > 1f || Vector3.Dot(crossProd, Vector3.down) > 1f))
+        {
+            _playerMovementState = PlayerMovementState.Air;
+            _chainGenerator.DisableLine();
+            Destroy(_joint);
+            
+        }
+           
     }
 
 
@@ -568,7 +655,7 @@ public class PlayerController : MonoBehaviour
     private void RegularMovementFixedUpdate()
     {
 
-        _rigidbody.AddForce(_moveDirection * _moveForce * _currentMultiplier);
+        _rigidbody.AddForce(transform.rotation * (_moveDirection * _moveForce * _currentMultiplier));
     }
 
     #endregion
